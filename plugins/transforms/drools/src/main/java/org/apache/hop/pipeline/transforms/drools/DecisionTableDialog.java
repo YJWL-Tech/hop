@@ -17,6 +17,15 @@
 
 package org.apache.hop.pipeline.transforms.drools;
 
+import java.io.File;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import org.apache.hop.core.Props;
 import org.apache.hop.core.row.IRowMeta;
 import org.apache.hop.core.row.IValueMeta;
@@ -41,6 +50,7 @@ import org.eclipse.swt.layout.FormAttachment;
 import org.eclipse.swt.layout.FormData;
 import org.eclipse.swt.layout.FormLayout;
 import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
@@ -54,8 +64,8 @@ public class DecisionTableDialog extends BaseTransformDialog {
   private DecisionTableMeta input;
 
   private TextVar wDecisionTableFile;
-  private TextVar wJavaClassName;
-  private TextVar wWorksheetName;
+  private Combo wJavaClassName;
+  private Combo wWorksheetName;
   private Button wAutoGenerateMappings;
   private Button wKeepInputFields;
   private TableView wFieldMappings;
@@ -179,7 +189,12 @@ public class DecisionTableDialog extends BaseTransformDialog {
     wDecisionTableFile =
         new TextVar(variables, wDecisionTableComp, SWT.SINGLE | SWT.LEFT | SWT.BORDER);
     PropsUi.setLook(wDecisionTableFile);
-    wDecisionTableFile.addModifyListener(lsMod);
+    wDecisionTableFile.addModifyListener(
+        e -> {
+          input.setChanged();
+          // 当文件路径改变时，自动更新worksheet name列表
+          updateWorksheetNameList();
+        });
     FormData fdDecisionTableFileText = new FormData();
     fdDecisionTableFileText.left = new FormAttachment(50, 0);
     fdDecisionTableFileText.top = new FormAttachment(0, margin);
@@ -207,7 +222,7 @@ public class DecisionTableDialog extends BaseTransformDialog {
     fdlJavaClassName.right = new FormAttachment(50, -margin);
     wlJavaClassName.setLayoutData(fdlJavaClassName);
 
-    wJavaClassName = new TextVar(variables, wDecisionTableComp, SWT.SINGLE | SWT.LEFT | SWT.BORDER);
+    wJavaClassName = new Combo(wDecisionTableComp, SWT.BORDER | SWT.DROP_DOWN);
     PropsUi.setLook(wJavaClassName);
     wJavaClassName.addModifyListener(lsMod);
     FormData fdJavaClassName = new FormData();
@@ -215,6 +230,9 @@ public class DecisionTableDialog extends BaseTransformDialog {
     fdJavaClassName.top = new FormAttachment(wDecisionTableFile, margin);
     fdJavaClassName.right = new FormAttachment(100, 0);
     wJavaClassName.setLayoutData(fdJavaClassName);
+
+    // 加载可用的POJO类
+    loadAvailablePojoClasses();
 
     // Worksheet name
     Label wlWorksheetName = new Label(wDecisionTableComp, SWT.RIGHT);
@@ -226,7 +244,7 @@ public class DecisionTableDialog extends BaseTransformDialog {
     fdlWorksheetName.right = new FormAttachment(50, -margin);
     wlWorksheetName.setLayoutData(fdlWorksheetName);
 
-    wWorksheetName = new TextVar(variables, wDecisionTableComp, SWT.SINGLE | SWT.LEFT | SWT.BORDER);
+    wWorksheetName = new Combo(wDecisionTableComp, SWT.BORDER | SWT.DROP_DOWN);
     PropsUi.setLook(wWorksheetName);
     wWorksheetName.addModifyListener(lsMod);
     FormData fdWorksheetName = new FormData();
@@ -496,6 +514,220 @@ public class DecisionTableDialog extends BaseTransformDialog {
     }
   }
 
+  /** 加载可用的POJO类 */
+  private void loadAvailablePojoClasses() {
+    try {
+      logBasic("开始扫描可用的POJO类...");
+      List<String> pojoClasses = scanForPojoClasses();
+
+      logBasic("找到 " + pojoClasses.size() + " 个符合条件的POJO类");
+      for (String className : pojoClasses) {
+        logDetailed("发现POJO类: " + className);
+      }
+
+      // 清空现有选项
+      wJavaClassName.removeAll();
+
+      // 添加扫描到的POJO类到下拉列表
+      for (String className : pojoClasses) {
+        wJavaClassName.add(className);
+      }
+
+      // 如果列表不为空，设置第一个作为默认选择
+      if (!pojoClasses.isEmpty()) {
+        wJavaClassName.select(0);
+        logBasic("默认选择第一个POJO类: " + pojoClasses.get(0));
+      } else {
+        logBasic("警告：未找到任何符合 com.leapfuture.*.pojo.* 模式的类");
+      }
+
+    } catch (Exception e) {
+      // 记录错误但不中断操作
+      logError("Error loading available POJO classes: " + e.getMessage(), e);
+    }
+  }
+
+  /** 扫描classpath中的com.leapfuture.*.pojo.*类 */
+  private List<String> scanForPojoClasses() {
+    List<String> classes = new ArrayList<>();
+
+    try {
+      // 1. 首先使用插件的 ClassLoader (更重要)
+      ClassLoader pluginClassLoader = getClass().getClassLoader();
+      scanWithClassLoader(pluginClassLoader, classes);
+
+      // 2. 然后使用当前线程的 ClassLoader
+      ClassLoader threadClassLoader = Thread.currentThread().getContextClassLoader();
+      if (threadClassLoader != pluginClassLoader) {
+        scanWithClassLoader(threadClassLoader, classes);
+      }
+
+      // 3. 扫描插件目录下的 lib 文件夹
+      scanPluginLibDirectory(classes);
+
+      // 4. 扫描系统 classpath (作为后备)
+      scanSystemClasspath(classes);
+
+    } catch (Exception e) {
+      logError("Error scanning for POJO classes: " + e.getMessage());
+    }
+
+    // 使用LinkedHashSet去重并保持顺序，然后排序
+    java.util.Set<String> uniqueClassSet = new java.util.LinkedHashSet<>(classes);
+    List<String> uniqueClasses = new ArrayList<>(uniqueClassSet);
+    Collections.sort(uniqueClasses);
+    return uniqueClasses;
+  }
+
+  /** 使用指定的 ClassLoader 进行扫描 */
+  private void scanWithClassLoader(ClassLoader classLoader, List<String> classes) {
+    try {
+      if (classLoader instanceof URLClassLoader) {
+        URLClassLoader urlClassLoader = (URLClassLoader) classLoader;
+        URL[] urls = urlClassLoader.getURLs();
+
+        for (URL url : urls) {
+          scanUrl(url, classes);
+        }
+      }
+    } catch (Exception e) {
+      logError("Error scanning with ClassLoader: " + e.getMessage());
+    }
+  }
+
+  /** 扫描插件 lib 目录 */
+  private void scanPluginLibDirectory(List<String> classes) {
+    try {
+      // 获取插件目录路径
+      File pluginJar =
+          new File(getClass().getProtectionDomain().getCodeSource().getLocation().toURI());
+      File pluginDir = pluginJar.getParentFile();
+
+      logDetailed("插件JAR路径: " + pluginJar.getAbsolutePath());
+      logDetailed("插件目录路径: " + pluginDir.getAbsolutePath());
+
+      // 查找 lib 目录
+      File libDir = new File(pluginDir, "lib");
+      logDetailed("lib目录路径: " + libDir.getAbsolutePath());
+
+      if (libDir.exists() && libDir.isDirectory()) {
+        logBasic("正在扫描插件lib目录: " + libDir.getAbsolutePath());
+        File[] jarFiles = libDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".jar"));
+        if (jarFiles != null) {
+          logBasic("找到 " + jarFiles.length + " 个JAR文件");
+          for (File jarFile : jarFiles) {
+            logDetailed("扫描JAR文件: " + jarFile.getName());
+            int beforeCount = classes.size();
+            scanJarFile(jarFile, classes);
+            int afterCount = classes.size();
+            if (afterCount > beforeCount) {
+              logDetailed(
+                  "从 " + jarFile.getName() + " 中找到 " + (afterCount - beforeCount) + " 个POJO类");
+            }
+          }
+        }
+      } else {
+        logBasic("lib目录不存在: " + libDir.getAbsolutePath());
+
+        // 尝试扫描插件目录本身的JAR文件
+        File[] dirJarFiles =
+            pluginDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".jar"));
+        if (dirJarFiles != null && dirJarFiles.length > 0) {
+          logBasic("扫描插件目录中的JAR文件...");
+          for (File jarFile : dirJarFiles) {
+            logDetailed("扫描插件JAR文件: " + jarFile.getName());
+            scanJarFile(jarFile, classes);
+          }
+        }
+      }
+    } catch (Exception e) {
+      logError("Error scanning plugin lib directory: " + e.getMessage(), e);
+    }
+  }
+
+  /** 扫描系统 classpath */
+  private void scanSystemClasspath(List<String> classes) {
+    try {
+      String classPath = System.getProperty("java.class.path");
+      if (classPath != null) {
+        String[] paths = classPath.split(System.getProperty("path.separator"));
+        for (String path : paths) {
+          try {
+            File file = new File(path);
+            if (file.exists()) {
+              scanUrl(file.toURI().toURL(), classes);
+            }
+          } catch (Exception e) {
+            // 忽略单个路径的错误
+          }
+        }
+      }
+    } catch (Exception e) {
+      logError("Error scanning system classpath: " + e.getMessage());
+    }
+  }
+
+  /** 扫描单个URL/路径中的类 */
+  private void scanUrl(URL url, List<String> classes) {
+    try {
+      String path = url.getFile();
+      File file = new File(path);
+
+      if (file.isDirectory()) {
+        scanDirectory(file, "", classes);
+      } else if (path.endsWith(".jar")) {
+        scanJarFile(file, classes);
+      }
+    } catch (Exception e) {
+      // 忽略单个URL的错误
+    }
+  }
+
+  /** 扫描目录中的类文件 */
+  private void scanDirectory(File directory, String packageName, List<String> classes) {
+    File[] files = directory.listFiles();
+    if (files == null) return;
+
+    for (File file : files) {
+      if (file.isDirectory()) {
+        String subPackage =
+            packageName.isEmpty() ? file.getName() : packageName + "." + file.getName();
+        scanDirectory(file, subPackage, classes);
+      } else if (file.getName().endsWith(".class")) {
+        String className = packageName + "." + file.getName().replace(".class", "");
+        if (isPojoClass(className)) {
+          classes.add(className);
+        }
+      }
+    }
+  }
+
+  /** 扫描JAR文件中的类 */
+  private void scanJarFile(File jarFile, List<String> classes) {
+    try (JarFile jar = new JarFile(jarFile)) {
+      Enumeration<JarEntry> entries = jar.entries();
+
+      while (entries.hasMoreElements()) {
+        JarEntry entry = entries.nextElement();
+        String name = entry.getName();
+
+        if (name.endsWith(".class")) {
+          String className = name.replace("/", ".").replace(".class", "");
+          if (isPojoClass(className)) {
+            classes.add(className);
+          }
+        }
+      }
+    } catch (Exception e) {
+      // 忽略JAR文件错误
+    }
+  }
+
+  /** 判断是否为符合条件的POJO类 */
+  private boolean isPojoClass(String className) {
+    return className.startsWith("com.leapfuture.") && className.contains(".pojo.");
+  }
+
   public void getData() {
     if (input.getDecisionTableFile() != null) {
       wDecisionTableFile.setText(input.getDecisionTableFile());
@@ -536,5 +768,145 @@ public class DecisionTableDialog extends BaseTransformDialog {
 
     wTransformName.selectAll();
     wTransformName.setFocus();
+  }
+
+  /** 从Excel文件中读取所有sheet名称 */
+  private List<String> getExcelSheetNames(String fileName) {
+    List<String> sheetNames = new ArrayList<>();
+
+    if (Utils.isEmpty(fileName)) {
+      return sheetNames;
+    }
+
+    // 解析变量
+    String resolvedFileName = variables.resolve(fileName);
+    java.io.File file = new java.io.File(resolvedFileName);
+
+    if (!file.exists()) {
+      logDetailed("Excel文件不存在: " + resolvedFileName);
+      return sheetNames;
+    }
+
+    try {
+      // 使用Apache POI读取Excel文件的sheet名称
+      org.apache.poi.ss.usermodel.Workbook workbook = null;
+
+      if (resolvedFileName.toLowerCase().endsWith(".xlsx")) {
+        workbook =
+            new org.apache.poi.xssf.usermodel.XSSFWorkbook(new java.io.FileInputStream(file));
+      } else if (resolvedFileName.toLowerCase().endsWith(".xls")) {
+        workbook =
+            new org.apache.poi.hssf.usermodel.HSSFWorkbook(new java.io.FileInputStream(file));
+      } else {
+        logDetailed("不支持的文件格式: " + resolvedFileName);
+        return sheetNames;
+      }
+
+      // 获取所有sheet名称
+      int numberOfSheets = workbook.getNumberOfSheets();
+      for (int i = 0; i < numberOfSheets; i++) {
+        String sheetName = workbook.getSheetName(i);
+        sheetNames.add(sheetName);
+        logDetailed("发现sheet: " + sheetName);
+      }
+
+      workbook.close();
+
+    } catch (Exception e) {
+      logError("读取Excel文件sheet列表时出错: " + e.getMessage());
+      // 即使出错也返回空列表，而不是抛出异常
+    }
+
+    return sheetNames;
+  }
+
+  /** 更新worksheet name下拉列表 */
+  private void updateWorksheetNameList() {
+    String fileName = wDecisionTableFile.getText();
+
+    // 保存当前选择的值
+    String currentSelection = wWorksheetName.getText();
+
+    // 清空现有选项
+    wWorksheetName.removeAll();
+
+    // 检查文件路径是否包含变量
+    if (containsVariables(fileName)) {
+      // 如果包含变量，尝试在设计时resolve（可能有默认值）
+      try {
+        String resolvedFileName = variables.resolve(fileName);
+        logDetailed("尝试解析变量: " + fileName + " -> " + resolvedFileName);
+
+        if (!Utils.isEmpty(resolvedFileName) && !resolvedFileName.equals(fileName)) {
+          // 成功解析且不同于原始值，尝试读取sheet
+          List<String> sheetNames = getExcelSheetNames(resolvedFileName);
+          if (!sheetNames.isEmpty()) {
+            // 成功读取到sheet，正常处理
+            for (String sheetName : sheetNames) {
+              wWorksheetName.add(sheetName);
+            }
+
+            if (!Utils.isEmpty(currentSelection) && sheetNames.contains(currentSelection)) {
+              wWorksheetName.setText(currentSelection);
+            } else {
+              wWorksheetName.select(0);
+            }
+
+            logBasic("通过变量解析成功加载 " + sheetNames.size() + " 个sheet");
+            return;
+          }
+        }
+      } catch (Exception e) {
+        logDetailed("变量解析失败: " + e.getMessage());
+      }
+
+      // 解析失败或文件不存在，允许手动输入
+      logDetailed("检测到变量，在设计时可能无法读取sheet列表: " + fileName);
+      wWorksheetName.add(""); // 添加空选项
+
+      // 恢复之前的选择（可能是手动输入的）
+      if (!Utils.isEmpty(currentSelection)) {
+        wWorksheetName.setText(currentSelection);
+        logDetailed("恢复之前的worksheet选择: " + currentSelection);
+      }
+
+      logBasic("文件路径包含变量，运行时将自动解析。当前允许手动输入worksheet名称。");
+      return;
+    }
+
+    // 获取sheet列表
+    List<String> sheetNames = getExcelSheetNames(fileName);
+
+    if (sheetNames.isEmpty()) {
+      // 如果没有找到sheet，允许用户手动输入
+      wWorksheetName.add("");
+      logDetailed("未找到Excel sheet，允许手动输入");
+    } else {
+      // 添加所有sheet到下拉列表
+      for (String sheetName : sheetNames) {
+        wWorksheetName.add(sheetName);
+      }
+
+      // 尝试恢复之前的选择
+      if (!Utils.isEmpty(currentSelection) && sheetNames.contains(currentSelection)) {
+        wWorksheetName.setText(currentSelection);
+        logDetailed("恢复之前选择的sheet: " + currentSelection);
+      } else if (!sheetNames.isEmpty()) {
+        // 默认选择第一个sheet
+        wWorksheetName.select(0);
+        logDetailed("默认选择第一个sheet: " + sheetNames.get(0));
+      }
+
+      logBasic("已加载 " + sheetNames.size() + " 个Excel sheet到下拉列表");
+    }
+  }
+
+  /** 检查字符串是否包含Hop变量 */
+  private boolean containsVariables(String text) {
+    if (Utils.isEmpty(text)) {
+      return false;
+    }
+    // 检查是否包含 ${...} 或 %%...%% 格式的变量
+    return text.contains("${") || text.contains("%%");
   }
 }

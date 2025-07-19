@@ -59,7 +59,7 @@ public class DecisionTableMeta extends BaseTransformMeta<DecisionTable, Decision
   private List<RuleResultItem> outputFields = new ArrayList<>();
 
   @HopMetadataProperty(key = "keep-input-fields")
-  private boolean keepInputFields = true;
+  private boolean keepInputFields = false;
 
   @HopMetadataProperty(key = "auto-generate-mappings")
   private boolean autoGenerateMappings = true;

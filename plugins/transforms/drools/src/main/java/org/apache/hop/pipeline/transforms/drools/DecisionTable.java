@@ -54,7 +54,7 @@ public class DecisionTable extends BaseTransform<DecisionTableMeta, DecisionTabl
       // Set configuration from meta
       data.setDecisionTableFile(resolve(meta.getDecisionTableFile()));
       data.setJavaClassName(meta.getJavaClassName());
-      data.setWorksheetName(meta.getWorksheetName());
+      data.setWorksheetName(resolve(meta.getWorksheetName()));
       data.setFieldMappings(meta.getFieldMappings());
       data.setKeepInputFields(meta.isKeepInputFields());
 
